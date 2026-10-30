@@ -366,8 +366,17 @@ def api():
     # is there a change from the webinterface?
     elif device.ui_synced is False:
 
+        # one-shot firmware update requested via the /thermostat API
+        if device.ui_source == "firmware_update":
+            _LOGGER.warning(
+                "Telling %s to fetch firmware (host %s, port %s)",
+                hardware_id,
+                device.host,
+                device.port,
+            )
+            xml += "<FW>1</FW>"
         # somebody pressed pause?
-        if device.ui_source == "pause_button":
+        elif device.ui_source == "pause_button":
             pause = int(device.source == Source.PAUSE.value)
             xml += f"<PAUSE>{pause}</PAUSE>"
             xml += f"<INIT><SRC>{device.source}</SRC></INIT>"
@@ -473,6 +482,9 @@ def thermostat(device_id):
             exceptions=device.exceptions,
             source=device.source,
             firmware=device.fw,
+            hardware=device.hw,
+            host=device.host,
+            port=device.port,
             ot={
                 "enabled": device.oo,
                 "raw": {
@@ -510,6 +522,31 @@ def thermostat(device_id):
             else:
                 device.source = Source.STD_WEEK.value
             device.ui_source = "pause_button"
+            device.ui_synced = False
+
+        # Server address that gets patched into firmware served by /fw.
+        if data.get("host") is not None:
+            host = str(data["host"]).strip()
+            if not host or len(host) > 17:
+                return jsonify(ok=False, error="host must be 1-17 characters"), 400
+            device.host = host
+        if data.get("port") is not None:
+            port = int(data["port"])
+            if not 1 <= port <= 65535:
+                return jsonify(ok=False, error="invalid port"), 400
+            device.port = port
+
+        # One-shot over-the-air firmware update. The thermostat gets <FW>1</FW>
+        # on its next poll and downloads firmware patched with host/port.
+        if data.get("firmware_update"):
+            if device.host in (None, "", "yourhostname"):
+                return jsonify(ok=False, error="set host before updating"), 400
+            if device.hw not in (2, 3, 4, 5):
+                return (
+                    jsonify(ok=False, error="hardware version not reported yet"),
+                    400,
+                )
+            device.ui_source = "firmware_update"
             device.ui_synced = False
 
         # Schedule changes: push a new calendar to the thermostat.
