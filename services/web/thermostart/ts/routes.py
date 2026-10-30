@@ -402,23 +402,22 @@ def api():
 
         tssrc = int(tsreq["src"][0])
 
-        # we're in manual (using TS interface) mode, communicate the manual temperature to our webinterface
-        if (
-            tssrc == Source.MANUAL.value
-            and "csv" in tsreq
-            and int(tsreq["csv"][0]) != device.target_temperature
-        ):
-            device.source = Source.MANUAL.value
-            db.session.commit()
-            emit(
-                "target_temperature",
-                {"target_temperature": int(tsreq["csv"][0])},
-                namespace="/",
-                to=hardware_id,
-            )
-            emit("source", {"source": tssrc}, namespace="/", to=hardware_id)
+        # Keep the stored setpoint in sync with what the thermostat reports
+        # (changes made on the device itself and schedule transitions), so
+        # the API and web UI show the real target temperature.
+        if tssrc != Source.CRASH.value and "csv" in tsreq:
+            tscsv = int(tsreq["csv"][0])
+            if tscsv != device.target_temperature:
+                device.target_temperature = tscsv
+                db.session.commit()
+                emit(
+                    "target_temperature",
+                    {"target_temperature": tscsv},
+                    namespace="/",
+                    to=hardware_id,
+                )
 
-        elif tssrc == Source.CRASH.value:
+        if tssrc == Source.CRASH.value:
 
             device.source = Source.STD_WEEK.value
             db.session.commit()
