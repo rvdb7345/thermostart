@@ -317,25 +317,33 @@ def api():
             "apikey": TOMORROW_APIKEY,
         }
         url = "https://api.tomorrow.io/v4/weather/realtime"
-        response = requests.request("GET", url, params=querystring)
-        response = json.loads(response.text)
-        outside_temperature = int(response["data"]["values"]["temperature"] * 10)
+        try:
+            response = requests.request("GET", url, params=querystring, timeout=10)
+            response = json.loads(response.text)
+            outside_temperature = int(response["data"]["values"]["temperature"] * 10)
+        except Exception as err:
+            _LOGGER.warning("Outside temperature lookup failed: %s", err)
+            # retry in an hour instead of on every poll
+            device.outside_temperature_timestamp = calendar.timegm(time.gmtime())
+            db.session.commit()
+            outside_temperature = None
 
-        xml += f"<BVSET>{outside_temperature}</BVSET>"
-        emit(
-            "outside_temperature",
-            {
-                "location": location.city,
-                "outside_temperature": outside_temperature,
-                "outside_temperature_icon": None,
-            },
-            namespace="/",
-            to=hardware_id,
-        )
+        if outside_temperature is not None:
+            xml += f"<BVSET>{outside_temperature}</BVSET>"
+            emit(
+                "outside_temperature",
+                {
+                    "location": location.city,
+                    "outside_temperature": outside_temperature,
+                    "outside_temperature_icon": None,
+                },
+                namespace="/",
+                to=hardware_id,
+            )
 
-        device.outside_temperature = outside_temperature
-        device.outside_temperature_timestamp = calendar.timegm(time.gmtime())
-        db.session.commit()
+            device.outside_temperature = outside_temperature
+            device.outside_temperature_timestamp = calendar.timegm(time.gmtime())
+            db.session.commit()
 
     # we need to initialize (device probably had a reboot)
     if "init" in tsreq:
@@ -485,32 +493,30 @@ def thermostat(device_id):
             },
         )
     else:
-        data = request.json
+        data = request.get_json(silent=True) or {}
 
-        if data.get("target_temperature"):
-            device.target_temperature = data.get("target_temperature")
-
-        if data.get("exceptions"):
-            device.exceptions = data.get("exceptions")
-
-        if data.get("standard_week"):
-            device.standard_week = data.get("standard_week")
-
-        if data.get("predefined_temperatures"):
-            device.predefined_temperatures = data.get("predefined_temperatures")
-
-        if data.get("outside_temperature"):
-            device.outside_temperature = data.get("outside_temperature")
-
-        if data.get("room_temperature"):
-            device.room_temperature = data.get("room_temperature")
-
-        if data.get("pause"):
-            device.room_temperature = data.get("pause")
+        # Setpoint change, handled like the web UI's +/- buttons so the
+        # thermostat picks it up on its next poll.
+        if data.get("target_temperature") is not None:
+            device.target_temperature = int(data["target_temperature"])
+            device.source = Source.SERVER.value
+            device.ui_source = "direct_temperature_setter_up"
             device.ui_synced = False
+
+        # Pause (away) on/off, handled like the web UI's pause button.
+        if data.get("pause") is not None:
+            if data["pause"]:
+                device.source = Source.PAUSE.value
+            else:
+                device.source = Source.STD_WEEK.value
             device.ui_source = "pause_button"
-            device.source = Source.PAUSE.value
+            device.ui_synced = False
 
-        device.commit()
+        # Schedule changes: push a new calendar to the thermostat.
+        for key in ("standard_week", "exceptions", "predefined_temperatures"):
+            if data.get(key) is not None:
+                setattr(device, key, data[key])
+                device.cal_synced = False
 
-    return Response(response="invalid method", status=400)
+        db.session.commit()
+        return jsonify(ok=True)
